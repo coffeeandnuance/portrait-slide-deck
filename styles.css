@@ -418,7 +418,10 @@ select {
 .display-root {
   min-height: 100vh;
   background: #000;
-  padding: 24px;
+  width: 100vw;
+  height: 100vh;
+  padding: 0;
+  margin: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -436,6 +439,89 @@ select {
   color: rgba(148, 163, 184, 0.8);
   font-size: 1.3rem;
   text-align: center;
+}
+
+.remote-root {
+  min-height: 100vh;
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  padding: 6px;
+  background: #020617;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+}
+
+.remote-root.empty {
+  color: rgba(148, 163, 184, 0.8);
+  font-size: 0.95rem;
+  text-align: center;
+}
+
+.remote-card {
+  flex: 0 0 180px;
+  width: 180px;
+  max-width: 180px;
+  min-width: 180px;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  border-radius: 16px;
+  background: rgba(15, 23, 42, 0.9);
+  color: inherit;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 6px;
+  cursor: pointer;
+  transition: transform 0.15s ease, border-color 0.15s ease;
+  overflow: hidden;
+}
+
+.remote-card:disabled {
+  cursor: default;
+  border-color: rgba(148, 163, 184, 0.2);
+}
+
+.remote-card:hover:not(:disabled) {
+  border-color: rgba(56, 189, 248, 0.6);
+}
+
+.remote-card:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.remote-card-label {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+
+.remote-card-meta {
+  font-size: 0.78rem;
+  color: #f8fafc;
+  text-align: center;
+  min-height: 1.1em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.remote-card .stage-shell {
+  margin: 0 auto;
+}
+
+.stage-shell.remote {
+  --scale: 0.22;
+}
+
+.remote-spacer {
+  flex: 0 0 180px;
+  width: 180px;
+  max-width: 180px;
+  min-width: 180px;
+  visibility: hidden;
 }
 
 .controls-bar {
@@ -459,6 +545,12 @@ select {
 
 .hidden {
   display: none !important;
+}
+
+.inline-warning {
+  margin-top: 8px;
+  font-size: 0.85rem;
+  color: #fecdd3;
 }
 
 @media (max-width: 900px) {

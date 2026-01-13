@@ -3,20 +3,53 @@ const BASE_STAGE_WIDTH = 540;
 const BASE_STAGE_HEIGHT = 960;
 const DEFAULT_TEXT_BG = "#0f172a";
 const DEFAULT_TEXT_COLOR = "#f8fafc";
+const DISPLAY_WINDOW_NAME = "obsPortraitDisplay";
+const DISPLAY_WINDOW_FEATURES_BASE = [
+  "popup=1",
+  `width=${BASE_STAGE_WIDTH}`,
+  `height=${BASE_STAGE_HEIGHT}`,
+  "resizable=yes",
+  "scrollbars=no",
+  "toolbar=0",
+  "location=0",
+  "status=0",
+  "menubar=0",
+];
+const REMOTE_WINDOW_NAME = "obsPortraitRemote";
+const REMOTE_WINDOW_FEATURES_BASE = [
+  "popup=1",
+  "resizable=yes",
+  "scrollbars=no",
+  "toolbar=0",
+  "location=0",
+  "status=0",
+  "menubar=0",
+  "width=720",
+  "height=320",
+];
 
 const root = document.getElementById("app");
 const params = new URLSearchParams(window.location.search);
 const isDisplay = params.get("view") === "display";
+const isRemote = params.get("view") === "remote";
 
 let deckState = loadState();
 let uiState = {
   selectedId: deckState.slides[deckState.currentIndex]?.id ?? null,
   replaceTargetId: null,
   restoreFocus: null,
+  displayBlocked: false,
+  remoteBlocked: false,
 };
+let displayWindowRef = null;
+let remoteWindowRef = null;
+let autoDisplayAttempted = false;
+let autoRemoteAttempted = false;
 
 render();
 attachGlobalListeners();
+maybeAutoOpenDisplayWindow();
+maybeAutoOpenRemoteWindow();
 
 function loadState() {
   if (typeof localStorage === "undefined") {
@@ -97,6 +130,12 @@ function attachGlobalListeners() {
     return;
   }
 
+  if (isRemote) {
+    root.addEventListener("click", handleRemoteClick);
+    window.addEventListener("keydown", handleRemoteKeydown);
+    return;
+  }
+
   root.addEventListener("click", handleClick);
   root.addEventListener("input", handleInput);
   root.addEventListener("change", handleChange);
@@ -134,6 +173,9 @@ function handleClick(event) {
       break;
     case "copyDisplayLink":
       copyDisplayLink();
+      break;
+    case "openRemote":
+      openRemoteWindow();
       break;
     case "prev":
       moveSlide(-1);
@@ -183,6 +225,33 @@ function handleClick(event) {
       break;
     default:
       break;
+  }
+}
+
+function handleRemoteClick(event) {
+  const actionEl = event.target.closest("[data-remote-action]");
+  if (!actionEl) return;
+  if (actionEl.dataset.hasSlide !== "true") return;
+  const action = actionEl.dataset.remoteAction;
+  if (action === "prev") {
+    moveSlide(-1);
+  } else if (action === "next") {
+    moveSlide(1);
+  } else if (action === "current") {
+    const slideId = actionEl.dataset.id;
+    if (slideId) {
+      goToSlide(slideId);
+    }
+  }
+}
+
+function handleRemoteKeydown(event) {
+  if (["ArrowRight", " "].includes(event.key)) {
+    event.preventDefault();
+    moveSlide(1);
+  } else if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    moveSlide(-1);
   }
 }
 
@@ -498,6 +567,8 @@ function handleImport(file) {
 function render() {
   if (isDisplay) {
     renderDisplay();
+  } else if (isRemote) {
+    renderRemote();
   } else {
     renderControl();
   }
@@ -512,6 +583,18 @@ function renderControl() {
   const nextSlide = slides[currentIndex + 1];
   const selected = slides.find((slide) => slide.id === uiState.selectedId);
   const displayUrl = buildDisplayUrl();
+  const remoteUrl = buildRemoteUrl();
+  const warnings = [];
+  if (uiState.displayBlocked) {
+    warnings.push(
+      '<p class="inline-warning" role="status">Your browser blocked the stage window. Click "Open display window" above to launch it manually.</p>'
+    );
+  }
+  if (uiState.remoteBlocked) {
+    warnings.push(
+      '<p class="inline-warning" role="status">Your browser blocked the quick remote. Click "Open mini remote" above to pop it out.</p>'
+    );
+  }
 
   root.innerHTML = `
     <header class="panel">
@@ -522,7 +605,9 @@ function renderControl() {
       <div class="import-export">
         <button type="button" class="btn accent" data-action="openDisplay">Open display window</button>
         <button type="button" class="btn ghost" data-action="copyDisplayLink">Copy display link</button>
+        <button type="button" class="btn ghost" data-action="openRemote">Open mini remote</button>
       </div>
+      ${warnings.join("")}
     </header>
     <main class="control-main">
       <section class="preview-column">
@@ -570,6 +655,9 @@ function renderControl() {
             Point a Browser Source at <strong>${displayUrl}</strong>. Set the source to
             <strong>1080x1920</strong>, enable <em>Refresh when scene becomes active</em>,
             and drag the source to fill your portrait half of the scene.
+          </p>
+          <p class="tips" style="margin-top:8px;">
+            Need a quiet remote? Bookmark <strong>${remoteUrl}</strong> or use the mini window button above while producing.
           </p>
         </div>
       </section>
@@ -677,6 +765,28 @@ function renderDisplay() {
   fitDisplayStage();
 }
 
+function renderRemote() {
+  const { slides, currentIndex } = deckState;
+  if (!slides.length) {
+    root.innerHTML = `
+      <div class="remote-root empty">
+        <p>No slides yet. Keep the main control room open to add slides.</p>
+      </div>
+    `;
+    return;
+  }
+  const prev = slides[currentIndex - 1];
+  const current = slides[currentIndex];
+  const next = slides[currentIndex + 1];
+  root.innerHTML = `
+    <div class="remote-root">
+      ${prev ? renderRemoteCard(prev, "Previous", "prev") : renderRemoteSpacer()}
+      ${renderRemoteCard(current, "Live", "current")}
+      ${next ? renderRemoteCard(next, "Next Up", "next") : renderRemoteSpacer()}
+    </div>
+  `;
+}
+
 function renderStage(slide, variant = "preview") {
   if (!slide) {
     return `<div class="stage-shell empty ${variant}">No slide loaded.</div>`;
@@ -685,6 +795,7 @@ function renderStage(slide, variant = "preview") {
   if (variant === "preview") classes.push("preview");
   if (variant === "list") classes.push("list");
   if (variant === "display") classes.push("display-shell", "display");
+  if (variant === "remote") classes.push("remote");
 
   const stageStyle =
     slide.type === "text"
@@ -723,6 +834,30 @@ function renderTextSlide(slide) {
     ? `<div class="footnote">${escapeHtml(slide.footnote)}</div>`
     : "";
   return `<div class="text-slide" data-align="${align}">${eyebrow}${title}${body}${footnote}</div>`;
+}
+
+function renderRemoteCard(slide, label, action) {
+  const meta = `<div class="remote-card-meta">${escapeHtml(
+    formatRemoteLabel(slide.label || slide.title || "Slide")
+  )}</div>`;
+  const stage = renderStage(slide, "remote");
+  return `
+    <button
+      type="button"
+      class="remote-card"
+      data-remote-action="${action}"
+      data-has-slide="true"
+      data-id="${slide.id}"
+    >
+      <span class="remote-card-label">${label}</span>
+      ${stage}
+      ${meta}
+    </button>
+  `;
+}
+
+function renderRemoteSpacer() {
+  return `<div class="remote-spacer" aria-hidden="true"></div>`;
 }
 
 function renderSlideRow(slide, index) {
@@ -860,9 +995,18 @@ function buildDisplayUrl() {
   return `${base}?view=display`;
 }
 
+function buildRemoteUrl() {
+  const href = window.location.href;
+  const [base] = href.split("?");
+  return `${base}?view=remote`;
+}
+
 function openDisplayWindow() {
-  const url = buildDisplayUrl();
-  window.open(url, "obsPortraitDisplay");
+  ensureDisplayWindow({ focus: true });
+}
+
+function openRemoteWindow() {
+  ensureRemoteWindow({ focus: true });
 }
 
 async function copyDisplayLink() {
@@ -877,6 +1021,13 @@ async function copyDisplayLink() {
 
 function formatMultiline(text) {
   return escapeHtml(text).replace(/\n/g, "<br />");
+}
+
+function formatRemoteLabel(text) {
+  if (!text) return "Slide";
+  const trimmed = text.trim();
+  if (trimmed.length <= 28) return trimmed;
+  return `${trimmed.slice(0, 25)}…`;
 }
 
 function escapeHtml(value) {
@@ -928,4 +1079,173 @@ function restoreEditorFocus() {
     }
   }
   uiState.restoreFocus = null;
+}
+
+function ensureDisplayWindow({ focus = false, markBlocked = true } = {}) {
+  if (isDisplay) return false;
+  const url = buildDisplayUrl();
+  if (displayWindowRef && displayWindowRef.closed) {
+    displayWindowRef = null;
+  }
+  if (displayWindowRef) {
+    try {
+      displayWindowRef.location.replace(url);
+      resizeDisplayWindow(displayWindowRef);
+    } catch (error) {
+      console.warn("Unable to refresh display window", error);
+      displayWindowRef = null;
+    }
+  }
+  if (!displayWindowRef) {
+    try {
+      displayWindowRef = window.open(
+        url,
+        DISPLAY_WINDOW_NAME,
+        buildDisplayWindowFeatures()
+      );
+      resizeDisplayWindow(displayWindowRef);
+    } catch (error) {
+      console.warn("Display window blocked", error);
+      displayWindowRef = null;
+    }
+  }
+  if (displayWindowRef) {
+    uiState.displayBlocked = false;
+    if (focus) {
+      try {
+        displayWindowRef.focus();
+      } catch (error) {
+        console.warn("Unable to focus display window", error);
+      }
+    }
+    return true;
+  }
+  if (markBlocked && !uiState.displayBlocked) {
+    uiState.displayBlocked = true;
+    render();
+  }
+  return false;
+}
+
+function ensureRemoteWindow({ focus = false, markBlocked = true } = {}) {
+  if (isDisplay || isRemote) return false;
+  const url = buildRemoteUrl();
+  if (remoteWindowRef && remoteWindowRef.closed) {
+    remoteWindowRef = null;
+  }
+  if (remoteWindowRef) {
+    try {
+      remoteWindowRef.location.replace(url);
+      resizeRemoteWindow(remoteWindowRef);
+    } catch (error) {
+      console.warn("Unable to refresh remote window", error);
+      remoteWindowRef = null;
+    }
+  }
+  if (!remoteWindowRef) {
+    try {
+      remoteWindowRef = window.open(
+        url,
+        REMOTE_WINDOW_NAME,
+        buildRemoteWindowFeatures()
+      );
+      resizeRemoteWindow(remoteWindowRef);
+    } catch (error) {
+      console.warn("Remote window blocked", error);
+      remoteWindowRef = null;
+    }
+  }
+  if (remoteWindowRef) {
+    uiState.remoteBlocked = false;
+    if (focus) {
+      try {
+        remoteWindowRef.focus();
+      } catch (error) {
+        console.warn("Unable to focus remote window", error);
+      }
+    }
+    return true;
+  }
+  if (markBlocked && !uiState.remoteBlocked) {
+    uiState.remoteBlocked = true;
+    render();
+  }
+  return false;
+}
+
+function maybeAutoOpenDisplayWindow() {
+  if (isDisplay || autoDisplayAttempted) return;
+  autoDisplayAttempted = true;
+  if (document.readyState === "complete") {
+    ensureDisplayWindow();
+  } else {
+    window.addEventListener(
+      "load",
+      () => {
+        ensureDisplayWindow();
+      },
+      { once: true }
+    );
+  }
+}
+
+function maybeAutoOpenRemoteWindow() {
+  if (isDisplay || isRemote || autoRemoteAttempted) return;
+  autoRemoteAttempted = true;
+  if (document.readyState === "complete") {
+    ensureRemoteWindow();
+  } else {
+    window.addEventListener(
+      "load",
+      () => {
+        ensureRemoteWindow();
+      },
+      { once: true }
+    );
+  }
+}
+
+function buildDisplayWindowFeatures() {
+  const left = Number.isFinite(window.screenX)
+    ? Math.max(0, Math.round(window.screenX + 60))
+    : 120;
+  const top = Number.isFinite(window.screenY)
+    ? Math.max(0, Math.round(window.screenY + 40))
+    : 80;
+  return [...DISPLAY_WINDOW_FEATURES_BASE, `left=${left}`, `top=${top}`].join(
+    ","
+  );
+}
+
+function resizeDisplayWindow(win) {
+  if (!win?.resizeTo) return;
+  try {
+    win.resizeTo(
+      Math.round(BASE_STAGE_WIDTH),
+      Math.round(BASE_STAGE_HEIGHT)
+    );
+  } catch (error) {
+    console.warn("Unable to resize display window", error);
+  }
+}
+
+function buildRemoteWindowFeatures() {
+  const left = Number.isFinite(window.screenX)
+    ? Math.max(0, Math.round(window.screenX + 80))
+    : 160;
+  const top = Number.isFinite(window.screenY)
+    ? Math.max(0, Math.round(window.screenY + 120))
+    : 120;
+  return [...REMOTE_WINDOW_FEATURES_BASE, `left=${left}`, `top=${top}`].join(
+    ","
+  );
+}
+
+function resizeRemoteWindow(win) {
+  if (!win?.resizeTo) return;
+  try {
+    win.resizeTo(720, 320);
+  } catch (error) {
+    console.warn("Unable to resize remote window", error);
+  }
 }
