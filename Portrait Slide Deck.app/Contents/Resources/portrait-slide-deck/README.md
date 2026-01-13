@@ -2,6 +2,16 @@
 
 A lightweight browser-based slide deck tuned for a 9:16 portrait output. Keep the controller window on one half of your screen, open the display view in another window (or OBS Browser Source), and advance slides with a click or the arrow keys.
 
+### One-click macOS app
+
+If you prefer a Finder-friendly launcher, drag `Portrait Slide Deck.app` into `/Applications` (or `~/Applications`) and double-click it. The app:
+
+1. Runs a bundled `python3 -m http.server` in the background on port 8778.
+2. Opens `http://localhost:8778/` in your default browser (control room) and the display view in a background tab.
+3. Stores the tiny server PID/log in `~/Library/Application Support/Portrait Slide Deck/` so you can quit the server by running `kill $(cat server.pid)` if needed (usually logging out or rebooting cleans it up automatically).
+
+Launch it again anytime; it reuses the existing server if it is already running.
+
 ### Run it locally
 
 The deck is a static HTML app, so any local web server works. Python's built-in server is the quickest way to launch it:
