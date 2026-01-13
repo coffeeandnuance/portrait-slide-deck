@@ -1,0 +1,29 @@
+#!/bin/bash
+set -euo pipefail
+APP_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+DECK_DIR="$APP_ROOT/Resources/portrait-slide-deck"
+SUPPORT_DIR="$HOME/Library/Application Support/Portrait Slide Deck"
+PID_FILE="$SUPPORT_DIR/server.pid"
+LOG_FILE="$SUPPORT_DIR/server.log"
+PORT="${PORTRAIT_DECK_PORT:-8778}"
+mkdir -p "$SUPPORT_DIR"
+if [[ ! -d "$DECK_DIR" ]]; then
+  osascript -e 'display alert "Portrait Slide Deck" message "Deck files missing inside the app bundle." as critical buttons {"OK"}' >/dev/null 2>&1 || true
+  exit 1
+fi
+if [[ -f "$PID_FILE" ]]; then
+  EXISTING_PID=$(cat "$PID_FILE")
+  if ! kill -0 "$EXISTING_PID" 2>/dev/null; then
+    rm -f "$PID_FILE"
+  fi
+fi
+if [[ ! -f "$PID_FILE" ]]; then
+  cd "$DECK_DIR"
+  /usr/bin/env python3 -m http.server "$PORT" >"$LOG_FILE" 2>&1 &
+  SERVER_PID=$!
+  echo "$SERVER_PID" >"$PID_FILE"
+  disown "$SERVER_PID" 2>/dev/null || true
+  sleep 1
+fi
+/usr/bin/open "http://localhost:$PORT/"
+/usr/bin/open -g "http://localhost:$PORT/?view=display"
