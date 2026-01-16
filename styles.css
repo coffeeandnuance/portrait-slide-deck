@@ -99,6 +99,42 @@ select {
   gap: 12px;
 }
 
+.deck-header {
+  align-items: flex-start;
+}
+
+.deck-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.deck-search {
+  min-width: 200px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.6);
+  background: rgba(15, 23, 42, 0.8);
+  padding: 8px 14px;
+  color: inherit;
+}
+
+.deck-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.filter-note {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin: 6px 0 0;
+}
+
+.filter-note.warning {
+  color: #fecdd3;
+}
+
 .preview-card {
   display: flex;
   flex-direction: column;
@@ -545,6 +581,39 @@ select {
 
 .hidden {
   display: none !important;
+}
+
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.85);
+  border: 2px dashed rgba(56, 189, 248, 0.45);
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.drop-overlay-inner {
+  text-align: center;
+  border-radius: 24px;
+  padding: 32px 48px;
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  box-shadow: 0 20px 50px rgba(2, 6, 23, 0.8);
+}
+
+.drop-overlay strong {
+  font-size: 1.2rem;
+  display: block;
+  letter-spacing: 0.02em;
+}
+
+.drop-overlay span {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
 }
 
 .inline-warning {

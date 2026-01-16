@@ -34,17 +34,22 @@ const isDisplay = params.get("view") === "display";
 const isRemote = params.get("view") === "remote";
 
 let deckState = loadState();
+const initialSelectedSlide =
+  deckState.slides[deckState.currentIndex] || null;
 let uiState = {
-  selectedId: deckState.slides[deckState.currentIndex]?.id ?? null,
+  selectedId: initialSelectedSlide ? initialSelectedSlide.id : null,
   replaceTargetId: null,
   restoreFocus: null,
   displayBlocked: false,
   remoteBlocked: false,
+  deckFilter: "",
+  dragActive: false,
 };
 let displayWindowRef = null;
 let remoteWindowRef = null;
 let autoDisplayAttempted = false;
 let autoRemoteAttempted = false;
+let dragCounter = 0;
 
 render();
 attachGlobalListeners();
@@ -65,9 +70,11 @@ function loadState() {
     if (!Array.isArray(parsed.slides)) {
       return { slides: [], currentIndex: 0 };
     }
+    const savedIndex =
+      typeof parsed.currentIndex === "number" ? parsed.currentIndex : 0;
     return {
       slides: parsed.slides,
-      currentIndex: clampIndex(parsed.currentIndex ?? 0, parsed.slides.length),
+      currentIndex: clampIndex(savedIndex, parsed.slides.length),
     };
   } catch (error) {
     console.warn("Failed to parse saved deck; starting fresh.", error);
@@ -110,10 +117,14 @@ function attachGlobalListeners() {
       try {
         const next = JSON.parse(event.newValue);
         if (Array.isArray(next.slides)) {
+          const incomingIndex =
+            typeof next.currentIndex === "number"
+              ? next.currentIndex
+              : deckState.currentIndex;
           deckState = {
             slides: next.slides,
             currentIndex: clampIndex(
-              next.currentIndex ?? deckState.currentIndex,
+              incomingIndex,
               next.slides.length
             ),
           };
@@ -142,11 +153,10 @@ function attachGlobalListeners() {
   root.addEventListener("submit", handleSubmit);
 
   window.addEventListener("keydown", (event) => {
-    if (
-      ["INPUT", "TEXTAREA", "SELECT"].includes(
-        document.activeElement?.tagName ?? ""
-      )
-    ) {
+    const activeTag = document.activeElement
+      ? document.activeElement.tagName
+      : "";
+    if (["INPUT", "TEXTAREA", "SELECT"].includes(activeTag)) {
       return;
     }
 
@@ -156,6 +166,47 @@ function attachGlobalListeners() {
     } else if (event.key === "ArrowLeft") {
       event.preventDefault();
       moveSlide(-1);
+    }
+  });
+
+  window.addEventListener("dragover", (event) => {
+    if (!eventHasFiles(event)) return;
+    event.preventDefault();
+  });
+
+  window.addEventListener("dragenter", (event) => {
+    if (!eventHasFiles(event)) return;
+    event.preventDefault();
+    dragCounter += 1;
+    if (!uiState.dragActive) {
+      uiState.dragActive = true;
+      render();
+    }
+  });
+
+  window.addEventListener("dragleave", (event) => {
+    if (!eventHasFiles(event)) return;
+    dragCounter = Math.max(0, dragCounter - 1);
+    if (dragCounter === 0 && uiState.dragActive) {
+      uiState.dragActive = false;
+      render();
+    }
+  });
+
+  window.addEventListener("drop", (event) => {
+    if (!eventHasFiles(event)) return;
+    event.preventDefault();
+    dragCounter = 0;
+    if (uiState.dragActive) {
+      uiState.dragActive = false;
+      render();
+    }
+    if (
+      event.dataTransfer &&
+      event.dataTransfer.files &&
+      event.dataTransfer.files.length
+    ) {
+      handleImageFiles(event.dataTransfer.files);
     }
   });
 }
@@ -256,6 +307,13 @@ function handleRemoteKeydown(event) {
 }
 
 function handleInput(event) {
+  const role = event.target.dataset.role;
+  if (role === "deck-search") {
+    uiState.deckFilter = event.target.value || "";
+    render();
+    return;
+  }
+
   const field = event.target.dataset.editField;
   if (!field) return;
   const slideId = event.target.dataset.slideId;
@@ -284,14 +342,18 @@ function handleChange(event) {
   }
 
   if (role === "import-json") {
-    handleImport(event.target.files?.[0]);
+    const importFiles = event.target.files;
+    const importFile = importFiles && importFiles[0];
+    handleImport(importFile);
     event.target.value = "";
     return;
   }
 
   if (role === "replace-image") {
-    if (uiState.replaceTargetId && event.target.files?.[0]) {
-      replaceImage(uiState.replaceTargetId, event.target.files[0]);
+    const replaceFiles = event.target.files;
+    const replaceFile = replaceFiles && replaceFiles[0];
+    if (uiState.replaceTargetId && replaceFile) {
+      replaceImage(uiState.replaceTargetId, replaceFile);
     }
     uiState.replaceTargetId = null;
     event.target.value = "";
@@ -330,7 +392,10 @@ function moveSlide(delta) {
     deckState.currentIndex + delta,
     deckState.slides.length
   );
-  uiState.selectedId = deckState.slides[deckState.currentIndex]?.id ?? null;
+  uiState.selectedId = getSlideIdAt(
+    deckState.slides,
+    deckState.currentIndex
+  );
   persistAndRender();
 }
 
@@ -350,7 +415,10 @@ function deleteSlide(slideId) {
     deckState.currentIndex = deckState.slides.length - 1;
   }
   if (uiState.selectedId === slideId) {
-    uiState.selectedId = deckState.slides[deckState.currentIndex]?.id ?? null;
+    uiState.selectedId = getSlideIdAt(
+      deckState.slides,
+      deckState.currentIndex
+    );
   }
   persistAndRender();
 }
@@ -467,7 +535,7 @@ function updateSlideField(slideId, field, value, restoreFocus = null) {
 }
 
 function handleImageFiles(fileList) {
-  if (!fileList?.length) return;
+  if (!fileList || !fileList.length) return;
   const files = Array.from(fileList).filter((file) =>
     file.type.startsWith("image/")
   );
@@ -475,7 +543,8 @@ function handleImageFiles(fileList) {
   Promise.all(files.map(fileToSlide))
     .then((newSlides) => {
       newSlides.forEach((slide) => deckState.slides.push(slide));
-      uiState.selectedId = newSlides[newSlides.length - 1]?.id ?? null;
+      const lastSlide = newSlides[newSlides.length - 1];
+      uiState.selectedId = lastSlide ? lastSlide.id : null;
       persistAndRender();
     })
     .catch((error) => {
@@ -551,11 +620,16 @@ function handleImport(file) {
           return Boolean(slide.title || slide.body);
         });
 
+      const importedIndex =
+        typeof data.currentIndex === "number" ? data.currentIndex : 0;
       deckState = {
         slides: sanitized,
-        currentIndex: clampIndex(data.currentIndex ?? 0, sanitized.length),
+        currentIndex: clampIndex(importedIndex, sanitized.length),
       };
-      uiState.selectedId = deckState.slides[deckState.currentIndex]?.id ?? null;
+      uiState.selectedId = getSlideIdAt(
+        deckState.slides,
+        deckState.currentIndex
+      );
       persistAndRender();
     })
     .catch((error) => {
@@ -577,11 +651,21 @@ function render() {
 function renderControl() {
   const { slides, currentIndex } = deckState;
   if (slides.length && !slides.find((slide) => slide.id === uiState.selectedId)) {
-    uiState.selectedId = slides[currentIndex]?.id ?? slides[0]?.id ?? null;
+    const currentSlideCandidate = slides[currentIndex];
+    if (currentSlideCandidate) {
+      uiState.selectedId = currentSlideCandidate.id;
+    } else if (slides[0]) {
+      uiState.selectedId = slides[0].id;
+    } else {
+      uiState.selectedId = null;
+    }
   }
   const currentSlide = slides[currentIndex];
   const nextSlide = slides[currentIndex + 1];
   const selected = slides.find((slide) => slide.id === uiState.selectedId);
+  const selectedIsDifferent =
+    Boolean(selected) &&
+    (!currentSlide || selected.id !== currentSlide.id);
   const displayUrl = buildDisplayUrl();
   const remoteUrl = buildRemoteUrl();
   const warnings = [];
@@ -594,6 +678,32 @@ function renderControl() {
     warnings.push(
       '<p class="inline-warning" role="status">Your browser blocked the quick remote. Click "Open mini remote" above to pop it out.</p>'
     );
+  }
+  const searchInputValue =
+    typeof uiState.deckFilter === "string" ? uiState.deckFilter : "";
+  const searchTerm = searchInputValue.trim();
+  const normalizedSearch = searchTerm.toLowerCase();
+  const filteredSlides = normalizedSearch
+    ? slides.filter((slide) => matchesSlideSearch(slide, normalizedSearch))
+    : slides;
+  const slideIndexMap = new Map();
+  slides.forEach((slide, index) => slideIndexMap.set(slide.id, index));
+  const selectedHidden =
+    Boolean(selected) &&
+    Boolean(normalizedSearch) &&
+    !filteredSlides.some((item) => item.id === selected.id);
+  let deckListMarkup = "";
+  if (!slides.length) {
+    deckListMarkup =
+      '<div class="empty-deck">No slides yet. Add a text slide or drop in PNG/JPG posters.</div>';
+  } else if (!filteredSlides.length) {
+    deckListMarkup = `<div class="empty-deck">No slides match “${escapeHtml(
+      searchTerm
+    )}”.</div>`;
+  } else {
+    deckListMarkup = `<ul class="slide-list">${filteredSlides
+      .map((slide) => renderSlideRow(slide, slideIndexMap.get(slide.id)))
+      .join("")}</ul>`;
   }
 
   root.innerHTML = `
@@ -625,7 +735,7 @@ function renderControl() {
             <button type="button" class="btn" data-action="prev">← Previous</button>
             <button type="button" class="btn" data-action="next">Next →</button>
             ${
-              selected && selected.id !== currentSlide?.id
+              selectedIsDifferent
                 ? `<button type="button" class="btn ghost" data-action="jumpTo" data-id="${selected.id}">Take selected live</button>`
                 : ""
             }
@@ -714,9 +824,24 @@ function renderControl() {
           </form>
         </div>
         <div class="panel">
-          <div class="panel-header">
-            <h2>Deck (${slides.length})</h2>
-            <div class="import-export">
+          <div class="panel-header deck-header">
+            <div>
+              <h2>Deck (${slides.length})</h2>
+              ${
+                normalizedSearch
+                  ? `<p class="filter-note">Showing ${filteredSlides.length} of ${slides.length}</p>`
+                  : ""
+              }
+            </div>
+            <div class="deck-header-actions">
+              <input
+                class="deck-search"
+                type="search"
+                placeholder="Search slides"
+                value="${escapeAttr(searchInputValue)}"
+                data-role="deck-search"
+                aria-label="Search slides"
+              />
               <button class="btn ghost" type="button" data-action="exportDeck" ${
                 slides.length ? "" : "disabled"
               }>Download deck JSON</button>
@@ -728,12 +853,11 @@ function renderControl() {
               : '<p class="muted">Select a slide to tweak text, colors, or image fit.</p>'
           }
           ${
-            slides.length
-              ? `<ul class="slide-list">${slides
-                  .map((slide, index) => renderSlideRow(slide, index))
-                  .join("")}</ul>`
-              : '<div class="empty-deck">No slides yet. Add a text slide or drop in PNG/JPG posters.</div>'
+            selectedHidden
+              ? '<p class="filter-note warning">Your selected slide is hidden by this search. Clear it to reveal the full deck.</p>'
+              : ""
           }
+          ${deckListMarkup}
         </div>
       </section>
     </main>
@@ -741,6 +865,16 @@ function renderControl() {
       Slides live entirely in this browser (localStorage). Export JSON backups whenever you dial in a rundown; importing reloads that order instantly.
     </footer>
     <input class="hidden" type="file" accept="image/*" data-role="replace-image" />
+    ${
+      uiState.dragActive
+        ? `<div class="drop-overlay">
+            <div class="drop-overlay-inner">
+              <strong>Drop PNG/JPG posters to add slides</strong>
+              <span>They'll upload directly into this deck.</span>
+            </div>
+          </div>`
+        : ""
+    }
   `;
   restoreEditorFocus();
 }
@@ -989,6 +1123,42 @@ function renderEditor(slide) {
   `;
 }
 
+function getSlideIdAt(slides, index) {
+  if (!Array.isArray(slides) || !slides.length) return null;
+  if (index < 0 || index >= slides.length) return null;
+  const slide = slides[index];
+  return slide ? slide.id || null : null;
+}
+
+function matchesSlideSearch(slide, needle) {
+  if (!needle) return true;
+  const haystacks = [
+    slide.label,
+    slide.title,
+    slide.body,
+    slide.footnote,
+    slide.eyebrow,
+  ]
+    .filter(Boolean)
+    .map((value) => String(value).toLowerCase());
+  return haystacks.some((chunk) => chunk.includes(needle));
+}
+
+function eventHasFiles(event) {
+  const types =
+    event.dataTransfer && event.dataTransfer.types
+      ? event.dataTransfer.types
+      : null;
+  if (!types) return false;
+  if (typeof types.includes === "function") {
+    return types.includes("Files");
+  }
+  if (typeof types.contains === "function") {
+    return types.contains("Files");
+  }
+  return Array.from(types).includes("Files");
+}
+
 function buildDisplayUrl() {
   const href = window.location.href;
   const [base] = href.split("?");
@@ -1045,7 +1215,10 @@ function escapeAttr(value) {
 }
 
 function generateId() {
-  if (window.crypto?.randomUUID) {
+  if (
+    window.crypto &&
+    typeof window.crypto.randomUUID === "function"
+  ) {
     return crypto.randomUUID();
   }
   return `slide-${Date.now().toString(36)}-${Math.random()
@@ -1218,7 +1391,7 @@ function buildDisplayWindowFeatures() {
 }
 
 function resizeDisplayWindow(win) {
-  if (!win?.resizeTo) return;
+  if (!win || typeof win.resizeTo !== "function") return;
   try {
     win.resizeTo(
       Math.round(BASE_STAGE_WIDTH),
@@ -1242,7 +1415,7 @@ function buildRemoteWindowFeatures() {
 }
 
 function resizeRemoteWindow(win) {
-  if (!win?.resizeTo) return;
+  if (!win || typeof win.resizeTo !== "function") return;
   try {
     win.resizeTo(720, 320);
   } catch (error) {

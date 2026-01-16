@@ -6,9 +6,28 @@ SUPPORT_DIR="$HOME/Library/Application Support/Portrait Slide Deck"
 PID_FILE="$SUPPORT_DIR/server.pid"
 LOG_FILE="$SUPPORT_DIR/server.log"
 PORT="${PORTRAIT_DECK_PORT:-8778}"
+PY_BIN=""
+PY_MODULE="http.server"
+if command -v python3 >/dev/null 2>&1; then
+  PY_BIN="$(command -v python3)"
+  PY_MODULE="http.server"
+elif command -v python >/dev/null 2>&1; then
+  PY_BIN="$(command -v python)"
+  PY_MODULE="SimpleHTTPServer"
+elif [[ -x "/usr/bin/python3" ]]; then
+  PY_BIN="/usr/bin/python3"
+  PY_MODULE="http.server"
+elif [[ -x "/usr/bin/python" ]]; then
+  PY_BIN="/usr/bin/python"
+  PY_MODULE="SimpleHTTPServer"
+fi
 mkdir -p "$SUPPORT_DIR"
 if [[ ! -d "$DECK_DIR" ]]; then
   osascript -e 'display alert "Portrait Slide Deck" message "Deck files missing inside the app bundle." as critical buttons {"OK"}' >/dev/null 2>&1 || true
+  exit 1
+fi
+if [[ -z "$PY_BIN" ]]; then
+  osascript -e 'display alert "Portrait Slide Deck" message "Python is missing on this Mac. Install Python 3 from python.org or enable the optional Command Line Tools, then relaunch." as critical buttons {"OK"}' >/dev/null 2>&1 || true
   exit 1
 fi
 if [[ -f "$PID_FILE" ]]; then
@@ -19,7 +38,8 @@ if [[ -f "$PID_FILE" ]]; then
 fi
 if [[ ! -f "$PID_FILE" ]]; then
   cd "$DECK_DIR"
-  /usr/bin/env python3 -m http.server "$PORT" >"$LOG_FILE" 2>&1 &
+  # shellcheck disable=SC2086
+  "$PY_BIN" -m "$PY_MODULE" "$PORT" >"$LOG_FILE" 2>&1 &
   SERVER_PID=$!
   echo "$SERVER_PID" >"$PID_FILE"
   disown "$SERVER_PID" 2>/dev/null || true
