@@ -620,6 +620,15 @@ select {
   margin-top: 8px;
   font-size: 0.85rem;
   color: #fecdd3;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.inline-warning-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 @media (max-width: 900px) {

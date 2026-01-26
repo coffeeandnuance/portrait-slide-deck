@@ -1,6 +1,9 @@
 const STORAGE_KEY = "obsPortraitDeckState:v1";
 const BASE_STAGE_WIDTH = 540;
 const BASE_STAGE_HEIGHT = 960;
+const MAX_IMAGE_WIDTH = BASE_STAGE_WIDTH * 2;
+const MAX_IMAGE_HEIGHT = BASE_STAGE_HEIGHT * 2;
+const MAX_IMAGE_DATA_URL_LENGTH = 2_600_000; // ~2 MB raw data
 const DEFAULT_TEXT_BG = "#0f172a";
 const DEFAULT_TEXT_COLOR = "#f8fafc";
 const DISPLAY_WINDOW_NAME = "obsPortraitDisplay";
@@ -44,17 +47,20 @@ let uiState = {
   remoteBlocked: false,
   deckFilter: "",
   dragActive: false,
+  storageError: null,
 };
 let displayWindowRef = null;
 let remoteWindowRef = null;
 let autoDisplayAttempted = false;
 let autoRemoteAttempted = false;
 let dragCounter = 0;
+let storageQuotaWarningShown = false;
 
 render();
 attachGlobalListeners();
 maybeAutoOpenDisplayWindow();
 maybeAutoOpenRemoteWindow();
+maybeNormalizeStoredImages();
 
 function loadState() {
   if (typeof localStorage === "undefined") {
@@ -101,7 +107,22 @@ function persistAndRender(options = {}) {
   }
 
   if (!isDisplay && typeof localStorage !== "undefined") {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(deckState));
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(deckState));
+      uiState.storageError = null;
+    } catch (error) {
+      console.warn("Unable to save deck state", error);
+      uiState.storageError = {
+        message:
+          "This deck is too large for auto-save. Export a JSON backup or remove some heavy image slides to stay under your browser's limit.",
+      };
+      if (isQuotaError(error) && !storageQuotaWarningShown) {
+        storageQuotaWarningShown = true;
+        window.alert(
+          "Your browser ran out of local storage while saving this deck. Export a JSON backup or remove some large image slides, then try again."
+        );
+      }
+    }
   }
 
   if (options.restoreFocus) {
@@ -257,6 +278,9 @@ function handleClick(event) {
       break;
     case "clearDeck":
       clearDeck();
+      break;
+    case "resetStorage":
+      resetDeckStorage();
       break;
     case "loadSample":
       loadSampleDeck();
@@ -454,11 +478,7 @@ function clearDeck() {
     "Clear all slides? This removes the current deck from your browser storage."
   );
   if (!confirmed) return;
-  deckState = { slides: [], currentIndex: 0 };
-  uiState.selectedId = null;
-  if (typeof localStorage !== "undefined") {
-    localStorage.removeItem(STORAGE_KEY);
-  }
+  wipeDeckState();
   render();
 }
 
@@ -540,12 +560,25 @@ function handleImageFiles(fileList) {
     file.type.startsWith("image/")
   );
   if (!files.length) return;
-  Promise.all(files.map(fileToSlide))
-    .then((newSlides) => {
-      newSlides.forEach((slide) => deckState.slides.push(slide));
-      const lastSlide = newSlides[newSlides.length - 1];
-      uiState.selectedId = lastSlide ? lastSlide.id : null;
-      persistAndRender();
+  settlePromises(files.map((file) => fileToSlide(file)))
+    .then((results) => {
+      const loadedSlides = results
+        .filter((result) => result.status === "fulfilled")
+        .map((result) => result.value);
+      loadedSlides.forEach((slide) => deckState.slides.push(slide));
+      if (loadedSlides.length) {
+        const lastSlide = loadedSlides[loadedSlides.length - 1];
+        uiState.selectedId = lastSlide ? lastSlide.id : null;
+        persistAndRender();
+      }
+      const failed = results.filter((result) => result.status === "rejected");
+      if (failed.length) {
+        const error = failed[0].reason;
+        const message =
+          (error && error.userMessage) ||
+          "Unable to load one of those images. Try a different file.";
+        window.alert(message);
+      }
     })
     .catch((error) => {
       console.error(error);
@@ -554,33 +587,233 @@ function handleImageFiles(fileList) {
 }
 
 function fileToSlide(file) {
+  return readFileAsDataUrl(file)
+    .then((dataUrl) => normalizeImageData(dataUrl, file.type))
+    .then((imageData) => ({
+      id: generateId(),
+      type: "image",
+      label: cleanLabel(file.name),
+      imageData,
+      imageFit: "cover",
+      imageOptimized: true,
+      createdAt: Date.now(),
+    }));
+}
+
+function readFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => {
-      resolve({
-        id: generateId(),
-        type: "image",
-        label: cleanLabel(file.name),
-        imageData: reader.result,
-        imageFit: "cover",
-        createdAt: Date.now(),
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () =>
+      reject({
+        userMessage:
+          "Unable to read one of those files. Try a different PNG or JPG poster.",
+        original: reader.error,
       });
-    };
-    reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(file);
   });
+}
+
+function normalizeImageData(dataUrl, sourceType) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      try {
+        const { width, height } = image;
+        const { targetWidth, targetHeight } = calculateTargetDimensions(
+          width,
+          height
+        );
+        const needsResize =
+          targetWidth !== width || targetHeight !== height;
+        const isOversized = typeof dataUrl === "string"
+          ? dataUrl.length > MAX_IMAGE_DATA_URL_LENGTH
+          : false;
+        if (!needsResize && !isOversized) {
+          resolve(dataUrl);
+          return;
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+        const context = canvas.getContext("2d");
+        if (!context) {
+          resolve(dataUrl);
+          return;
+        }
+        context.drawImage(image, 0, 0, targetWidth, targetHeight);
+        const outputType = pickOutputMimeType(
+          sourceType,
+          context,
+          targetWidth,
+          targetHeight
+        );
+        const quality = outputType === "image/jpeg" ? 0.92 : undefined;
+        const nextDataUrl = canvas.toDataURL(outputType, quality);
+        resolve(nextDataUrl || dataUrl);
+      } catch (error) {
+        console.warn("Unable to normalize image data", error);
+        resolve(dataUrl);
+      }
+    };
+    image.onerror = () => {
+      console.warn("Unable to decode image for normalization; using original data");
+      resolve(dataUrl);
+    };
+    image.src = dataUrl;
+  });
+}
+
+function calculateTargetDimensions(width, height) {
+  if (!Number.isFinite(width) || !Number.isFinite(height)) {
+    return { targetWidth: BASE_STAGE_WIDTH, targetHeight: BASE_STAGE_HEIGHT };
+  }
+  const widthScale = MAX_IMAGE_WIDTH / width;
+  const heightScale = MAX_IMAGE_HEIGHT / height;
+  const scale = Math.min(1, widthScale, heightScale);
+  if (scale === 1) {
+    return { targetWidth: Math.round(width), targetHeight: Math.round(height) };
+  }
+  return {
+    targetWidth: Math.max(1, Math.round(width * scale)),
+    targetHeight: Math.max(1, Math.round(height * scale)),
+  };
+}
+
+function pickOutputMimeType(sourceType, context, width, height) {
+  const normalizedType = (sourceType || "").toLowerCase();
+  if (normalizedType === "image/png") {
+    if (containsTransparency(context, width, height)) {
+      return "image/png";
+    }
+    return "image/jpeg";
+  }
+  if (
+    normalizedType === "image/jpeg" ||
+    normalizedType === "image/jpg" ||
+    normalizedType === "image/pjpeg"
+  ) {
+    return "image/jpeg";
+  }
+  if (normalizedType === "image/webp") {
+    return "image/jpeg";
+  }
+  return "image/jpeg";
+}
+
+function containsTransparency(context, width, height) {
+  try {
+    const imageData = context.getImageData(0, 0, width, height);
+    const data = imageData.data;
+    for (let index = 3; index < data.length; index += 4) {
+      if (data[index] < 255) {
+        return true;
+      }
+    }
+    return false;
+  } catch (error) {
+    console.warn("Unable to inspect alpha channel", error);
+    return true;
+  }
+}
+
+function settlePromises(promises) {
+  if (typeof Promise.allSettled === "function") {
+    return Promise.allSettled(promises);
+  }
+  return Promise.all(
+    promises.map((promise) =>
+      promise
+        .then((value) => ({ status: "fulfilled", value }))
+        .catch((reason) => ({ status: "rejected", reason }))
+    )
+  );
+}
+
+function maybeNormalizeStoredImages() {
+  if (isDisplay || isRemote) return;
+  const targets = deckState.slides.filter((slide) =>
+    shouldNormalizeSlideImage(slide)
+  );
+  if (!targets.length) return;
+  let sequence = Promise.resolve();
+  targets.forEach((slide) => {
+    sequence = sequence
+      .then(() =>
+        normalizeImageData(
+          slide.imageData,
+          inferMimeTypeFromDataUrl(slide.imageData)
+        ).then((normalized) => {
+          let updated = false;
+          if (
+            typeof normalized === "string" &&
+            normalized &&
+            normalized !== slide.imageData
+          ) {
+            slide.imageData = normalized;
+            updated = true;
+          }
+          if (!slide.imageOptimized) {
+            slide.imageOptimized = true;
+            updated = true;
+          }
+          if (updated) {
+            persistAndRender();
+          }
+        })
+      )
+      .catch((error) => {
+        console.warn("Unable to normalize stored image", error);
+      });
+  });
+}
+
+function shouldNormalizeSlideImage(slide) {
+  return (
+    slide &&
+    slide.type === "image" &&
+    typeof slide.imageData === "string" &&
+    slide.imageData.length > MAX_IMAGE_DATA_URL_LENGTH &&
+    !slide.imageOptimized
+  );
+}
+
+function inferMimeTypeFromDataUrl(value) {
+  if (typeof value !== "string") return "";
+  const match = value.match(/^data:([^;,]+)/i);
+  return match && match[1] ? match[1].toLowerCase() : "";
+}
+
+function isQuotaError(error) {
+  if (!error) return false;
+  const name = error.name || error.code;
+  return (
+    name === "QuotaExceededError" ||
+    name === "NS_ERROR_DOM_QUOTA_REACHED" ||
+    error.code === 22 ||
+    error.code === 1014
+  );
 }
 
 function replaceImage(slideId, file) {
   const slide = deckState.slides.find((item) => item.id === slideId);
   if (!slide || slide.type !== "image" || !file) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    slide.imageData = reader.result;
-    slide.label = cleanLabel(file.name);
-    persistAndRender();
-  };
-  reader.readAsDataURL(file);
+  readFileAsDataUrl(file)
+    .then((dataUrl) => normalizeImageData(dataUrl, file.type))
+    .then((imageData) => {
+      slide.imageData = imageData;
+      slide.label = cleanLabel(file.name);
+      slide.imageFit = slide.imageFit || "cover";
+      slide.imageOptimized = true;
+      persistAndRender();
+    })
+    .catch((error) => {
+      console.error("Unable to replace image", error);
+      const message =
+        (error && error.userMessage) ||
+        "Unable to replace that slide image. Try a different PNG or JPG.";
+      window.alert(message);
+    });
 }
 
 function cleanLabel(name) {
@@ -611,6 +844,8 @@ function handleImport(file) {
           align: slide.align === "left" ? "left" : "center",
           imageData: slide.imageData || "",
           imageFit: slide.imageFit === "contain" ? "contain" : "cover",
+          imageOptimized:
+            slide.type === "image" ? Boolean(slide.imageOptimized) : undefined,
           createdAt: slide.createdAt || Date.now(),
         }))
         .filter((slide) => {
@@ -631,6 +866,7 @@ function handleImport(file) {
         deckState.currentIndex
       );
       persistAndRender();
+      maybeNormalizeStoredImages();
     })
     .catch((error) => {
       console.error(error);
@@ -669,6 +905,16 @@ function renderControl() {
   const displayUrl = buildDisplayUrl();
   const remoteUrl = buildRemoteUrl();
   const warnings = [];
+  if (uiState.storageError) {
+    warnings.push(
+      `<div class="inline-warning" role="status">
+        <span>${escapeHtml(uiState.storageError.message)}</span>
+        <div class="inline-warning-actions">
+          <button type="button" class="btn danger" data-action="resetStorage">Reset local deck</button>
+        </div>
+      </div>`
+    );
+  }
   if (uiState.displayBlocked) {
     warnings.push(
       '<p class="inline-warning" role="status">Your browser blocked the stage window. Click "Open display window" above to launch it manually.</p>'
@@ -1420,5 +1666,22 @@ function resizeRemoteWindow(win) {
     win.resizeTo(720, 320);
   } catch (error) {
     console.warn("Unable to resize remote window", error);
+  }
+}
+function resetDeckStorage() {
+  const confirmed = window.confirm(
+    "Reset local deck storage? This clears every slide, removes the saved copy, and frees browser space."
+  );
+  if (!confirmed) return;
+  wipeDeckState();
+  render();
+}
+
+function wipeDeckState() {
+  deckState = { slides: [], currentIndex: 0 };
+  uiState.selectedId = null;
+  uiState.storageError = null;
+  if (typeof localStorage !== "undefined") {
+    localStorage.removeItem(STORAGE_KEY);
   }
 }
